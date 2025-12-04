@@ -7,6 +7,20 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Universe Presets
+SECTOR_ETFS = ["XLF", "XLK", "XLE", "XLV", "XLY", "XLP", "XLI", "XLC", "XLU", "XLB", "XLRE", "SMH", "IBB", "KRE"]
+DOW_30 = ["AAPL", "MSFT", "JPM", "V", "UNH", "PG", "HD", "JNJ", "MRK", "CRM", "CVX", "KO", "WMT", "CSCO", "MCD", "DIS", "CAT", "AXP", "IBM", "GS", "AMGN", "VZ", "BA", "HON", "NKE", "TRV", "MMM", "DOW", "INTC", "WBA"]
+QQQ_TOP = ["AAPL", "MSFT", "NVDA", "AVGO", "AMZN", "META", "TSLA", "GOOGL", "GOOG", "COST", "ADBE", "NFLX", "AMD", "PEP", "CSCO", "INTC", "TMUS", "CMCSA", "INTU", "AMGN", "QCOM", "TXN", "HON", "AMAT", "BKNG", "SBUX", "GILD", "ISRG", "MDLZ", "ADP", "LRCX", "REGN", "VRTX", "ADI", "PANW", "MU"]
+MAG_7 = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA"]
+
+UNIVERSE_PRESETS = {
+    "Custom Input": (None, None),
+    "Sector ETFs": (SECTOR_ETFS, "SPY"),
+    "Dow 30": (DOW_30, "DIA"),
+    "Nasdaq 100": (QQQ_TOP, "QQQ"),
+    "Magnificent 7": (MAG_7, "SPY")
+}
+
 # Page Configuration
 st.set_page_config(
     page_title="Securities Market Line Analysis",
@@ -182,6 +196,16 @@ def create_sml_plot(df, market_return, risk_free_rate):
     # Color points by Alpha
     colors = ['#00FFFF' if alpha > 0 else '#FF0055' for alpha in df['Alpha']]
     
+    # Create customdata using np.stack for proper 2D array structure
+    custom_data_array = np.stack((
+        df['Ticker'].values,
+        df['Alpha'].values,
+        df['Expected Return'].values,
+        df['Beta'].values,
+        df['Actual Return'].values,
+        df['Volatility'].values
+    ), axis=-1)
+    
     fig = go.Figure()
     
     # Add SML line
@@ -194,25 +218,30 @@ def create_sml_plot(df, market_return, risk_free_rate):
         showlegend=True
     ))
     
-    # Add scatter points
+    # Add scatter points with markers+text mode - names always visible with matching colors
+    # Create individual traces for each point to ensure text colors match dot colors
     for idx, row in df.iterrows():
+        ticker_color = colors[idx]
         fig.add_trace(go.Scatter(
             x=[row['Beta']],
             y=[row['Actual Return']],
-            mode='markers',
+            mode='markers+text',
+            text=[row['Ticker']],
+            textposition='top center',
+            textfont=dict(size=10, color=ticker_color),
             name=row['Ticker'],
             marker=dict(
                 size=12,
-                color=colors[idx],
+                color=ticker_color,
                 line=dict(width=1, color='#0e1117')
             ),
-            text=f"Ticker: {row['Ticker']}<br>" +
-                 f"Beta: {row['Beta']:.4f}<br>" +
-                 f"Actual Return: {row['Actual Return']:.4f}<br>" +
-                 f"Expected Return: {row['Expected Return']:.4f}<br>" +
-                 f"Alpha: {row['Alpha']:.4f}<br>" +
-                 f"Volatility: {row['Volatility']:.4f}",
-            hovertemplate='%{text}<extra></extra>',
+            customdata=[[row['Ticker'], row['Alpha'], row['Expected Return'], row['Beta'], row['Actual Return'], row['Volatility']]],
+            hovertemplate='<b>Ticker: %{customdata[0]}</b><br>' +
+                         'Beta: %{x:.4f}<br>' +
+                         'Actual Return: %{y:.4f}<br>' +
+                         'Expected Return: %{customdata[2]:.4f}<br>' +
+                         'Alpha: %{customdata[1]:.4f}<br>' +
+                         'Volatility: %{customdata[5]:.4f}<extra></extra>',
             showlegend=False
         ))
     
@@ -274,18 +303,59 @@ def style_dataframe(df):
 with st.sidebar:
     st.markdown("### Input Parameters")
     
-    ticker_input = st.text_area(
-        "Ticker List",
-        value="AAPL\nMSFT\nGOOGL\nAMZN\nTSLA\nNVDA\nMETA\nNFLX",
-        height=150,
-        help="Enter tickers separated by newlines"
+    # Universe Preset Selector
+    universe_selection = st.selectbox(
+        "Universe",
+        options=list(UNIVERSE_PRESETS.keys()),
+        index=0,
+        help="Select a preset universe or use Custom Input",
+        key='universe_selectbox'
     )
     
-    benchmark_ticker = st.text_input(
-        "Benchmark Ticker",
-        value="SPY",
-        help="Market benchmark (e.g., SPY, QQQ)"
+    # Initialize session state
+    if 'ticker_input_value' not in st.session_state:
+        st.session_state['ticker_input_value'] = "AAPL\nMSFT\nGOOGL\nAMZN\nTSLA\nNVDA\nMETA\nNFLX"
+    if 'last_universe_selection' not in st.session_state:
+        st.session_state['last_universe_selection'] = universe_selection
+    if 'benchmark_value' not in st.session_state:
+        st.session_state['benchmark_value'] = "SPY"
+    
+    # Update ticker input and benchmark when universe selection changes
+    if universe_selection != st.session_state['last_universe_selection']:
+        if universe_selection != "Custom Input":
+            ticker_list, benchmark = UNIVERSE_PRESETS[universe_selection]
+            st.session_state['ticker_input_value'] = "\n".join(ticker_list)
+            st.session_state['benchmark_value'] = benchmark
+        st.session_state['last_universe_selection'] = universe_selection
+    
+    ticker_input = st.text_area(
+        "Asset List",
+        value=st.session_state['ticker_input_value'],
+        height=150,
+        help="Enter tickers separated by newlines",
+        key='ticker_input_area'
     )
+    
+    # Always update session state with current text area value
+    st.session_state['ticker_input_value'] = ticker_input
+    
+    # Set benchmark based on universe selection
+    if universe_selection != "Custom Input":
+        _, default_benchmark = UNIVERSE_PRESETS[universe_selection]
+        benchmark_ticker = st.text_input(
+            "Benchmark Ticker",
+            value=default_benchmark,
+            help="Market benchmark (e.g., SPY, QQQ, DIA)",
+            key='benchmark_input'
+        )
+    else:
+        benchmark_ticker = st.text_input(
+            "Benchmark Ticker",
+            value=st.session_state.get('benchmark_value', 'SPY'),
+            help="Market benchmark (e.g., SPY, QQQ, DIA)",
+            key='benchmark_input'
+        )
+        st.session_state['benchmark_value'] = benchmark_ticker
     
     period_options = {
         "1Y": "1y",
