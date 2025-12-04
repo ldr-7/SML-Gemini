@@ -7,6 +7,15 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Universe Presets
+UNIVERSE_PRESETS = {
+    "Custom Input": "",
+    "Sector ETFs": "XLF\nXLK\nXLE\nXLV\nXLY\nXLP\nXLI\nXLC\nXLU\nXLB\nXLRE\nSMH\nIBB\nKRE",
+    "Dow Jones 30": "AAPL\nMSFT\nUNH\nGS\nHD\nCAT\nMCD\nV\nTRV\nAMGN\nCRM\nHON\nAXP\nBA\nJPM\nIBM\nPG\nCVX\nWMT\nJNJ\nMRK\nDIS\nNKE\nVZ\nCSCO\nINTC\nDOW\nWBA\nMMM\nAMZN",
+    "Nasdaq 100 (Top 50)": "AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nGOOG\nTSLA\nAVGO\nCOST\nNFLX\nAMD\nPEP\nADBE\nCSCO\nCMCSA\nINTC\nTXN\nQCOM\nAMGN\nHON\nINTU\nAMAT\nISRG\nBKNG\nVRTX\nADI\nLRCX\nPANW\nMU\nSNPS\nKLAC\nCDNS\nADP\nCRWD\nFTNT\nNXPI\nON\nMCHP\nDXCM\nPAYX\nROST\nODFL\nCTAS\nFAST\nPCAR\nIDXX\nTEAM\nGEHC\nANSS",
+    "Magnificent 7": "AAPL\nMSFT\nGOOGL\nAMZN\nNVDA\nMETA\nTSLA"
+}
+
 # Page Configuration
 st.set_page_config(
     page_title="Securities Market Line Analysis",
@@ -206,13 +215,13 @@ def create_sml_plot(df, market_return, risk_free_rate):
                 color=colors[idx],
                 line=dict(width=1, color='#0e1117')
             ),
-            text=f"Ticker: {row['Ticker']}<br>" +
-                 f"Beta: {row['Beta']:.4f}<br>" +
-                 f"Actual Return: {row['Actual Return']:.4f}<br>" +
-                 f"Expected Return: {row['Expected Return']:.4f}<br>" +
-                 f"Alpha: {row['Alpha']:.4f}<br>" +
-                 f"Volatility: {row['Volatility']:.4f}",
-            hovertemplate='%{text}<extra></extra>',
+            customdata=[[row['Ticker'], row['Alpha'], row['Expected Return'], row['Beta'], row['Actual Return'], row['Volatility']]],
+            hovertemplate='<b>Ticker: %{customdata[0]}</b><br>' +
+                         'Beta: %{x:.4f}<br>' +
+                         'Actual Return: %{y:.4f}<br>' +
+                         'Expected Return: %{customdata[2]:.4f}<br>' +
+                         'Alpha: %{customdata[1]:.4f}<br>' +
+                         'Volatility: %{customdata[5]:.4f}<extra></extra>',
             showlegend=False
         ))
     
@@ -274,12 +283,37 @@ def style_dataframe(df):
 with st.sidebar:
     st.markdown("### Input Parameters")
     
-    ticker_input = st.text_area(
-        "Ticker List",
-        value="AAPL\nMSFT\nGOOGL\nAMZN\nTSLA\nNVDA\nMETA\nNFLX",
-        height=150,
-        help="Enter tickers separated by newlines"
+    # Universe Preset Selector
+    universe_selection = st.selectbox(
+        "Universe",
+        options=list(UNIVERSE_PRESETS.keys()),
+        index=0,
+        help="Select a preset universe or use Custom Input",
+        key='universe_selectbox'
     )
+    
+    # Initialize session state
+    if 'ticker_input_value' not in st.session_state:
+        st.session_state['ticker_input_value'] = "AAPL\nMSFT\nGOOGL\nAMZN\nTSLA\nNVDA\nMETA\nNFLX"
+    if 'last_universe_selection' not in st.session_state:
+        st.session_state['last_universe_selection'] = universe_selection
+    
+    # Update ticker input when universe selection changes to a preset
+    if universe_selection != st.session_state['last_universe_selection']:
+        if universe_selection != "Custom Input":
+            st.session_state['ticker_input_value'] = UNIVERSE_PRESETS[universe_selection]
+        st.session_state['last_universe_selection'] = universe_selection
+    
+    ticker_input = st.text_area(
+        "Asset Universe",
+        value=st.session_state['ticker_input_value'],
+        height=150,
+        help="Enter tickers separated by newlines",
+        key='ticker_input_area'
+    )
+    
+    # Always update session state with current text area value
+    st.session_state['ticker_input_value'] = ticker_input
     
     benchmark_ticker = st.text_input(
         "Benchmark Ticker",
