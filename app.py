@@ -3,6 +3,7 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -125,12 +126,13 @@ def annualize_volatility(daily_returns):
 def calculate_capm_metrics(tickers, benchmark_ticker, period, risk_free_rate):
     """Calculate CAPM metrics for all tickers"""
     results = []
+    asset_returns_dict = {}  # Store individual asset returns for portfolio calculation
     
     # Fetch benchmark data
     benchmark_prices = fetch_price_data(benchmark_ticker, period)
     if benchmark_prices is None or benchmark_prices.empty:
         st.error(f"Failed to fetch benchmark data for {benchmark_ticker}")
-        return pd.DataFrame()
+        return pd.DataFrame(), {}, pd.Series(dtype=float), np.nan
     
     benchmark_returns = calculate_log_returns(benchmark_prices)
     market_return = annualize_return(benchmark_returns)
@@ -159,6 +161,9 @@ def calculate_capm_metrics(tickers, benchmark_ticker, period, risk_free_rate):
         asset_aligned = aligned_returns['asset'].values
         market_aligned = aligned_returns['market'].values
         
+        # Store aligned returns for portfolio calculation
+        asset_returns_dict[ticker] = aligned_returns['asset']
+        
         # Calculate metrics
         beta = calculate_beta(asset_aligned, market_aligned)
         actual_return = annualize_return(asset_aligned)
@@ -182,15 +187,70 @@ def calculate_capm_metrics(tickers, benchmark_ticker, period, risk_free_rate):
             'Volatility': volatility
         })
     
-    return pd.DataFrame(results), market_return
+    return pd.DataFrame(results), asset_returns_dict, benchmark_returns, market_return
 
-def create_sml_plot(df, market_return, risk_free_rate):
+def calculate_portfolio_metrics(asset_returns_dict, benchmark_returns, market_return, risk_free_rate):
+    """Calculate Equal-Weighted Portfolio metrics"""
+    if not asset_returns_dict:
+        return None
+    
+    # Align all returns to common dates
+    returns_df = pd.DataFrame(asset_returns_dict)
+    returns_df = returns_df.dropna()  # Drop rows with any NaN
+    
+    if returns_df.empty or len(returns_df) < 30:
+        return None
+    
+    # Equal-weighted portfolio returns (simple average)
+    portfolio_returns = returns_df.mean(axis=1)
+    
+    # Align portfolio returns with benchmark
+    aligned = pd.DataFrame({
+        'portfolio': portfolio_returns,
+        'market': benchmark_returns
+    }).dropna()
+    
+    if len(aligned) < 30:
+        return None
+    
+    portfolio_aligned = aligned['portfolio'].values
+    market_aligned = aligned['market'].values
+    
+    # Calculate portfolio metrics
+    portfolio_beta = calculate_beta(portfolio_aligned, market_aligned)
+    portfolio_return = annualize_return(portfolio_aligned)
+    
+    if np.isnan(portfolio_beta) or np.isnan(portfolio_return):
+        return None
+    
+    # CAPM Expected Return
+    expected_return = risk_free_rate + portfolio_beta * (market_return - risk_free_rate)
+    
+    # Jensen's Alpha
+    portfolio_alpha = portfolio_return - expected_return
+    
+    return {
+        'Ticker': 'PORTFOLIO',
+        'Beta': portfolio_beta,
+        'Actual Return': portfolio_return,
+        'Expected Return': expected_return,
+        'Alpha': portfolio_alpha,
+        'Volatility': annualize_volatility(portfolio_aligned)
+    }
+
+def create_sml_plot(df, market_return, risk_free_rate, portfolio_metrics=None):
     """Create Securities Market Line scatter plot"""
     if df.empty:
         return go.Figure()
     
     # Create SML line
-    beta_range = np.linspace(df['Beta'].min() - 0.2, df['Beta'].max() + 0.2, 100)
+    beta_min = df['Beta'].min()
+    beta_max = df['Beta'].max()
+    if portfolio_metrics:
+        beta_min = min(beta_min, portfolio_metrics['Beta'])
+        beta_max = max(beta_max, portfolio_metrics['Beta'])
+    
+    beta_range = np.linspace(beta_min - 0.2, beta_max + 0.2, 100)
     sml_line = risk_free_rate + beta_range * (market_return - risk_free_rate)
     
     # Color points by Alpha
@@ -243,6 +303,39 @@ def create_sml_plot(df, market_return, risk_free_rate):
                          'Alpha: %{customdata[1]:.4f}<br>' +
                          'Volatility: %{customdata[5]:.4f}<extra></extra>',
             showlegend=False
+        ))
+    
+    # Add Portfolio point as large gold star
+    if portfolio_metrics:
+        fig.add_trace(go.Scatter(
+            x=[portfolio_metrics['Beta']],
+            y=[portfolio_metrics['Actual Return']],
+            mode='markers+text',
+            text=['PORTFOLIO'],
+            textposition='top center',
+            textfont=dict(size=12, color='#FFD700', family='Inter', weight='bold'),
+            name='Portfolio',
+            marker=dict(
+                symbol='star',
+                size=20,
+                color='#FFD700',
+                line=dict(width=2, color='#0e1117')
+            ),
+            customdata=[[
+                portfolio_metrics['Ticker'],
+                portfolio_metrics['Alpha'],
+                portfolio_metrics['Expected Return'],
+                portfolio_metrics['Beta'],
+                portfolio_metrics['Actual Return'],
+                portfolio_metrics['Volatility']
+            ]],
+            hovertemplate='<b>PORTFOLIO (Equal-Weighted)</b><br>' +
+                         'Beta: %{x:.4f}<br>' +
+                         'Actual Return: %{y:.4f}<br>' +
+                         'Expected Return: %{customdata[2]:.4f}<br>' +
+                         'Alpha: %{customdata[1]:.4f}<br>' +
+                         'Volatility: %{customdata[5]:.4f}<extra></extra>',
+            showlegend=True
         ))
     
     fig.update_layout(
@@ -298,6 +391,143 @@ def style_dataframe(df):
     })
     
     return styled
+
+def calculate_risk_metrics(asset_returns_dict):
+    """Calculate VaR, CVaR, and Max Drawdown for each asset"""
+    risk_results = []
+    
+    for ticker, returns in asset_returns_dict.items():
+        if len(returns) < 30:
+            continue
+        
+        returns_array = returns.values
+        
+        # VaR (95%) - 5th percentile
+        var_95 = np.percentile(returns_array, 5)
+        
+        # CVaR (95%) - Expected Shortfall (average of returns below 5th percentile)
+        cvar_95 = returns_array[returns_array <= var_95].mean()
+        if np.isnan(cvar_95):
+            cvar_95 = var_95
+        
+        # Max Drawdown calculation
+        # Convert log returns to cumulative returns
+        cumulative_returns = np.exp(np.cumsum(returns_array))
+        running_max = np.maximum.accumulate(cumulative_returns)
+        drawdown = (cumulative_returns - running_max) / running_max
+        max_drawdown = drawdown.min()
+        
+        risk_results.append({
+            'Ticker': ticker,
+            'VaR (95%)': var_95,
+            'CVaR (95%)': cvar_95,
+            'Max Drawdown': max_drawdown
+        })
+    
+    return pd.DataFrame(risk_results)
+
+def style_risk_dataframe(df):
+    """Apply heatmap styling to risk metrics (Red = High Risk, Green = Low Risk)"""
+    if df.empty:
+        return df
+    
+    def color_risk(val, col_name):
+        """Color based on risk level"""
+        if col_name == 'VaR (95%)' or col_name == 'CVaR (95%)':
+            # More negative = higher risk (red), less negative = lower risk (green)
+            if val < -0.05:  # Very high risk
+                return 'background-color: rgba(255, 0, 0, 0.4); color: #FF0000'
+            elif val < -0.02:  # High risk
+                return 'background-color: rgba(255, 100, 100, 0.3); color: #FF6464'
+            elif val < 0:  # Moderate risk
+                return 'background-color: rgba(255, 200, 0, 0.2); color: #FFC800'
+            else:  # Low risk
+                return 'background-color: rgba(0, 255, 0, 0.2); color: #00FF00'
+        elif col_name == 'Max Drawdown':
+            # More negative = higher risk (red), less negative = lower risk (green)
+            if val < -0.5:  # Very high risk
+                return 'background-color: rgba(255, 0, 0, 0.4); color: #FF0000'
+            elif val < -0.3:  # High risk
+                return 'background-color: rgba(255, 100, 100, 0.3); color: #FF6464'
+            elif val < -0.15:  # Moderate risk
+                return 'background-color: rgba(255, 200, 0, 0.2); color: #FFC800'
+            else:  # Low risk
+                return 'background-color: rgba(0, 255, 0, 0.2); color: #00FF00'
+        return ''
+    
+    # Apply styling column by column
+    styled = df.style
+    for col in ['VaR (95%)', 'CVaR (95%)', 'Max Drawdown']:
+        if col in df.columns:
+            styled = styled.applymap(
+                lambda val, c=col: color_risk(val, c),
+                subset=[col]
+            )
+    
+    styled = styled.format({
+        'VaR (95%)': '{:.4f}',
+        'CVaR (95%)': '{:.4f}',
+        'Max Drawdown': '{:.4f}'
+    })
+    
+    return styled
+
+def calculate_correlation_matrix(asset_returns_dict):
+    """Calculate correlation matrix of log returns"""
+    if not asset_returns_dict:
+        return None
+    
+    # Align all returns to common dates
+    returns_df = pd.DataFrame(asset_returns_dict)
+    returns_df = returns_df.dropna()
+    
+    if returns_df.empty:
+        return None
+    
+    # Calculate correlation matrix
+    corr_matrix = returns_df.corr()
+    
+    return corr_matrix
+
+def create_correlation_heatmap(corr_matrix):
+    """Create Plotly heatmap for correlation matrix"""
+    if corr_matrix is None or corr_matrix.empty:
+        return go.Figure()
+    
+    fig = px.imshow(
+        corr_matrix,
+        color_continuous_scale='RdBu_r',
+        aspect='auto',
+        text_auto='.2f',
+        labels=dict(color='Correlation')
+    )
+    
+    fig.update_layout(
+        title={
+            'text': 'Asset Correlation Matrix',
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 18, 'color': '#FAFAFA', 'family': 'Inter'}
+        },
+        plot_bgcolor='#0e1117',
+        paper_bgcolor='#0e1117',
+        font=dict(color='#FAFAFA'),
+        height=600,
+        xaxis=dict(
+            tickfont=dict(color='#A0A0A0', family='Courier New'),
+            title_font=dict(color='#FAFAFA', family='Inter')
+        ),
+        yaxis=dict(
+            tickfont=dict(color='#A0A0A0', family='Courier New'),
+            title_font=dict(color='#FAFAFA', family='Inter')
+        ),
+        coloraxis_colorbar=dict(
+            tickfont=dict(color='#A0A0A0', family='Courier New'),
+            title_font=dict(color='#FAFAFA', family='Inter')
+        )
+    )
+    
+    return fig
 
 # Sidebar
 with st.sidebar:
@@ -422,23 +652,34 @@ if calculate_button or 'results' not in st.session_state:
         st.warning("Please enter at least one ticker symbol.")
     else:
         with st.spinner("Fetching data and calculating metrics..."):
-            df, market_return = calculate_capm_metrics(
+            df, asset_returns_dict, benchmark_returns, market_return = calculate_capm_metrics(
                 tickers, benchmark_ticker, period, risk_free_rate
             )
             
             if df.empty:
                 st.error("No valid data retrieved. Please check ticker symbols and try again.")
             else:
+                # Calculate portfolio metrics
+                portfolio_metrics = calculate_portfolio_metrics(
+                    asset_returns_dict, benchmark_returns, market_return, risk_free_rate
+                )
+                
                 st.session_state['results'] = df
+                st.session_state['asset_returns_dict'] = asset_returns_dict
+                st.session_state['benchmark_returns'] = benchmark_returns
                 st.session_state['market_return'] = market_return
                 st.session_state['risk_free_rate'] = risk_free_rate
                 st.session_state['benchmark'] = benchmark_ticker
+                st.session_state['portfolio_metrics'] = portfolio_metrics
 
 if 'results' in st.session_state:
     df = st.session_state['results']
     market_return = st.session_state['market_return']
     risk_free_rate = st.session_state['risk_free_rate']
     benchmark = st.session_state['benchmark']
+    portfolio_metrics = st.session_state.get('portfolio_metrics', None)
+    asset_returns_dict = st.session_state.get('asset_returns_dict', {})
+    benchmark_returns = st.session_state.get('benchmark_returns', None)
     
     # KPI Metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -488,16 +729,78 @@ if 'results' in st.session_state:
     st.markdown("<br>", unsafe_allow_html=True)
     
     # Main Visualization
-    fig = create_sml_plot(df, market_return, risk_free_rate)
+    fig = create_sml_plot(df, market_return, risk_free_rate, portfolio_metrics)
     st.plotly_chart(fig, use_container_width=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Data Table
-    st.markdown("### Detailed Metrics")
-    styled_df = style_dataframe(df)
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        height=400
-    )
+    # Advanced Risk Tabs
+    tab1, tab2, tab3 = st.tabs(["Alpha Metrics", "Risk Desk", "Correlations"])
+    
+    with tab1:
+        st.markdown("### Alpha Metrics")
+        
+        # Include portfolio in the display dataframe if available
+        display_df = df.copy()
+        if portfolio_metrics:
+            portfolio_row = pd.DataFrame([portfolio_metrics])
+            display_df = pd.concat([display_df, portfolio_row], ignore_index=True)
+        
+        styled_df = style_dataframe(display_df)
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            height=400
+        )
+        
+        # CSV Download Button
+        csv = display_df.to_csv(index=False)
+        st.download_button(
+            label="Download Alpha Metrics as CSV",
+            data=csv,
+            file_name=f"alpha_metrics_{benchmark}_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+    
+    with tab2:
+        st.markdown("### Risk Desk")
+        
+        if asset_returns_dict:
+            risk_df = calculate_risk_metrics(asset_returns_dict)
+            
+            if not risk_df.empty:
+                styled_risk_df = style_risk_dataframe(risk_df)
+                st.dataframe(
+                    styled_risk_df,
+                    use_container_width=True,
+                    height=400
+                )
+                
+                st.markdown("""
+                    <div style="margin-top: 15px; padding: 10px; background-color: rgba(20, 25, 35, 0.6); border-radius: 4px;">
+                        <p style="color: #A0A0A0; font-size: 12px; margin: 0;">
+                            <b>Risk Metrics Definitions:</b><br>
+                            <b>VaR (95%):</b> Historical Value at Risk - 5th percentile of returns (worst 5% of days)<br>
+                            <b>CVaR (95%):</b> Conditional VaR (Expected Shortfall) - Average return on worst 5% of days<br>
+                            <b>Max Drawdown:</b> Maximum observed loss from peak to trough over the period
+                        </p>
+                    </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.warning("Insufficient data to calculate risk metrics.")
+        else:
+            st.warning("No asset returns data available.")
+    
+    with tab3:
+        st.markdown("### Correlations")
+        
+        if asset_returns_dict:
+            corr_matrix = calculate_correlation_matrix(asset_returns_dict)
+            
+            if corr_matrix is not None and not corr_matrix.empty:
+                corr_fig = create_correlation_heatmap(corr_matrix)
+                st.plotly_chart(corr_fig, use_container_width=True)
+            else:
+                st.warning("Insufficient data to calculate correlation matrix.")
+        else:
+            st.warning("No asset returns data available.")
