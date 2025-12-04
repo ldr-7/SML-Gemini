@@ -324,9 +324,16 @@ with st.sidebar:
     if universe_selection != st.session_state['last_universe_selection']:
         if universe_selection != "Custom Input":
             ticker_list, benchmark = UNIVERSE_PRESETS[universe_selection]
-            st.session_state['ticker_input_value'] = "\n".join(ticker_list)
+            ticker_input_str = "\n".join(ticker_list)
+            st.session_state['ticker_input_value'] = ticker_input_str
             st.session_state['benchmark_value'] = benchmark
+            # Update the widget's session state directly
+            st.session_state['ticker_input_area'] = ticker_input_str
+            st.session_state['benchmark_input'] = benchmark
         st.session_state['last_universe_selection'] = universe_selection
+        # Clear results to force recalculation when universe changes
+        if 'results' in st.session_state:
+            del st.session_state['results']
     
     ticker_input = st.text_area(
         "Asset List",
@@ -344,10 +351,12 @@ with st.sidebar:
         _, default_benchmark = UNIVERSE_PRESETS[universe_selection]
         benchmark_ticker = st.text_input(
             "Benchmark Ticker",
-            value=default_benchmark,
+            value=st.session_state.get('benchmark_value', default_benchmark),
             help="Market benchmark (e.g., SPY, QQQ, DIA)",
             key='benchmark_input'
         )
+        # Update session state to keep it in sync
+        st.session_state['benchmark_value'] = benchmark_ticker
     else:
         benchmark_ticker = st.text_input(
             "Benchmark Ticker",
